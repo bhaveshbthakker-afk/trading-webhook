@@ -72,6 +72,11 @@ def chartink_webhook(secret):
     triggered = str(data.get('triggered_at', '')).strip()[:100]
     stocks = split_values(data.get('stocks'))
     prices = split_values(data.get('trigger_prices'))
+    # Chartink's Test webhook sends these literal demonstration labels.
+    # Acknowledge only this exact sample; never persist fake symbols.
+    if [x.upper() for x in stocks] == ['SYMBOL 1', 'SYMBOL 2', 'SYMBOL 3']:
+        app.logger.info('CHARTINK_DIAGNOSTIC sample_test_acknowledged stored=0')
+        return jsonify(status='ok', test=True, received=0, stored=0), 200
     if not stocks or not any(stocks) or len(stocks) > 500:
         app.logger.warning('CHARTINK_DIAGNOSTIC invalid_stock_list')
         return jsonify(error='invalid stock list'), 400
