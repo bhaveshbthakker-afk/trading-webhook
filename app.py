@@ -1,5 +1,6 @@
 """Chartink webhook receiver. No broker orders or credentials in source."""
 import hmac
+import logging
 import os
 import re
 import sqlite3
@@ -8,6 +9,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 DB = Path(os.environ.get('ALERTS_DB', '/tmp/chartink_alerts.db'))
 SECRET = os.environ.get('CHARTINK_WEBHOOK_SECRET', '')
 READ_SECRET = os.environ.get('CHARTINK_READ_SECRET', '')
@@ -44,9 +46,19 @@ def split_values(value):
 def health():
     return jsonify(status='running')
 
+@app.after_request
+def diagnostic_response(response):
+    # Never log request paths, query strings, headers, payloads, or secrets.
+    if request.endpoint == 'chartink_webhook':
+        app.logger.info('CHARTINK_DIAGNOSTIC method=POST status=%d content_type=%s',
+                        response.status_code,
+                        'json' if request.is_json else 'form_or_other')
+    return response
+
 @app.post('/chartink-webhook/<secret>')
 def chartink_webhook(secret):
     if not authorized(SECRET, secret):
+        app.logger.warning('CHARTINK_DIAGNOSTIC authentication_failed')
         return jsonify(error='unauthorized'), 401
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -55,16 +67,19 @@ def chartink_webhook(secret):
         return jsonify(error='invalid payload'), 400
     scan = str(data.get('scan_name', '')).strip()[:120]
     if not scan:
+        app.logger.warning('CHARTINK_DIAGNOSTIC missing_scan_name')
         return jsonify(error='scan_name required'), 400
     triggered = str(data.get('triggered_at', '')).strip()[:100]
     stocks = split_values(data.get('stocks'))
     prices = split_values(data.get('trigger_prices'))
     if not stocks or not any(stocks) or len(stocks) > 500:
+        app.logger.warning('CHARTINK_DIAGNOSTIC invalid_stock_list')
         return jsonify(error='invalid stock list'), 400
     parsed = []
     for index, raw in enumerate(stocks):
         symbol = raw.upper().removeprefix('NSE:')
         if not SYMBOL.fullmatch(symbol):
+            app.logger.warning('CHARTINK_DIAGNOSTIC invalid_stock_symbol')
             return jsonify(error='invalid stock symbol'), 400
         raw_price = prices[index] if index < len(prices) else ''
         try:
@@ -82,6 +97,7 @@ def chartink_webhook(secret):
             VALUES (?, ?, ?, ?, ?)''',
             [(now, scan, triggered, symbol, price) for symbol, price in parsed])
         stored = conn.total_changes - before
+    app.logger.info('CHARTINK_DIAGNOSTIC accepted received=%d stored=%d', len(parsed), stored)
     return jsonify(status='ok', received=len(parsed), stored=stored), 200
 
 @app.get('/alerts')
